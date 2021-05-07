@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -49,6 +51,7 @@ type webResp struct {
 
 var webCons = make(map[string]map[string]*webCon)
 var webSessions *cache.Cache
+var webCookies sync.Map
 
 func handleWebReq(req *webReq) {
 	dev := req.dev
@@ -80,6 +83,14 @@ func handleWebResp(resp *webResp) {
 		return
 	}
 
+	// 尝试将data数据解析为http消息并获取其Set-Cookie字段，保存到webCookies
+	r, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(data)), nil)
+	if err == nil {
+		for _, cookie := range r.Cookies() {
+			webCookies.Store(cookie.Name, cookie.Value)
+		}
+	}
+
 	c := wc.c
 
 	c.Write(data)
@@ -93,6 +104,16 @@ func makeWebReqMsg(br *broker, dev client.Client, srcAddr []byte, r *http.Reques
 	req = append(req, r.RequestURI...)
 	req = append(req, ' ')
 	req = append(req, "HTTP/1.1\r\n"...)
+
+	// 添加webCookies到当前请求
+	webCookies.Range(func(key, val interface{}) bool {
+		r.AddCookie(&http.Cookie{
+			Name:     key.(string),
+			Value:    val.(string),
+			HttpOnly: true,
+		})
+		return true
+	})
 
 	for k, v := range r.Header {
 		req = append(req, k...)
@@ -345,6 +366,12 @@ func webReqRedirect(br *broker, c *gin.Context) {
 		}
 	}
 
+	// 清空 webCookies
+	webCookies.Range(func(key, val interface{}) bool {
+		webCookies.Delete(key)
+		return true
+	})
+
 	sid = utils.GenUniqueID("web")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -356,3 +383,4 @@ func webReqRedirect(br *broker, c *gin.Context) {
 
 	c.Redirect(http.StatusFound, location)
 }
+
